@@ -76,6 +76,8 @@ contains
                             write_blocking_report, update_shift_damping
         use report, only: write_date_time_close
 
+        use cc_msu
+
         type(sys_t), intent(in) :: sys
         type(qmc_in_t), intent(in) :: qmc_in
         type(fciqmc_in_t), intent(in) :: fciqmc_in
@@ -123,6 +125,8 @@ contains
         integer :: iunit, restart_version_restart
         integer :: date_values(8)
 
+        type(cc_hmat_t) :: cc_hmat
+
         if (parent) then
             write (io_unit,'(1X,"FCIQMC")')
             write (io_unit,'(1X,"------",/)')
@@ -140,6 +144,8 @@ contains
         ! Initialise data.
         call init_qmc(sys, qmc_in, restart_in, load_bal_in, reference_in, io_unit, annihilation_flags, qs, uuid_restart, &
                       restart_version_restart, fciqmc_in=fciqmc_in, qmc_state_restart=qmc_state_restart)
+
+        call init_hmat(sys, cc_hmat)
 
         if (debug) call init_logging(logging_in, logging_info, 0)
 
@@ -224,6 +230,13 @@ contains
 
         do ireport = 1, qmc_in%nreport
 
+            if (mod(ireport, 100) == 0) then
+                !call gen_p_space(sys, qs%ref%f0, cc_hmat, qs%psip_list)
+                call write_dets(sys, qs%psip_list, ireport)
+                call cc_p_driver(sys, qs%ref, qs%psip_list, ireport)
+                !call test_list(cc_hmat, qs%psip_list)
+            endif
+
             qs%estimators%proj_energy_old = get_sanitized_projected_energy(qs)
 
             ! Zero report cycle quantities.
@@ -274,6 +287,7 @@ contains
                     call set_parent_flag(real_population, qmc_in%initiator_pop, determ%flags(idet), &
                                          fciqmc_in%quadrature_initiator, cdet%initiator_flag)
 
+                    call store_hmat(sys, cc_hmat, cdet%fock_sum, cdet%f, cdet%f)
                     do ispace = 1, qs%psip_list%nspaces
 
                         imag = sys%read_in%comp .and. mod(ispace,2) == 0
@@ -297,7 +311,7 @@ contains
                         call do_fciqmc_spawning_attempt(rng, qs%spawn_store%spawn, bloom_stats, sys, qs, nattempts_current_det, &
                                                         cdet, determ, determ_parent, qs%psip_list%pops(ispace, idet), &
                                                         sys%read_in%comp .and. modulo(ispace,2)==0, &
-                                                        ispace, logging_info)
+                                                        ispace, logging_info, cc_hmat)
 
                         ! Clone or die.
                         if (.not. determ_parent) then
@@ -312,7 +326,7 @@ contains
                     if (fciqmc_in%non_blocking_comm) then
                         call receive_spawned_walkers(spawn_recv, req_data_s)
                         call evolve_spawned_walkers(sys, qmc_in, qs, spawn_recv, spawn, cdet, rng, ndeath, &
-                                                    fciqmc_in%quadrature_initiator, logging_info, bloom_stats)
+                                                    fciqmc_in%quadrature_initiator, logging_info, bloom_stats, cc_hmat)
                         call direct_annihilation_received_list(sys, rng, qs%ref, annihilation_flags, pl, spawn_recv)
                         ! Need to add walkers which have potentially moved processor to the spawned walker list.
                         if (qs%par_info%load%needed) then
@@ -421,7 +435,7 @@ contains
     end subroutine do_fciqmc
 
     subroutine evolve_spawned_walkers(sys, qmc_in, qs, spawn_recv, spawn_to_send, cdet, rng, ndeath, &
-                                    quadrature_initiator, logging_info, bloom_stats)
+                                    quadrature_initiator, logging_info, bloom_stats, cc_hmat)
 
         ! Evolve spawned list of walkers one time step.
         ! Used for non-blocking communications.
@@ -455,6 +469,10 @@ contains
         use bloom_handler, only: bloom_stats_t
         use semi_stoch, only: semi_stoch_t
 
+        use reference_determinant, only: reference_t, reference_t_json
+
+        use cc_msu, only: cc_hmat_t
+
         type(sys_t), intent(in) :: sys
         type(qmc_in_t), intent(in) :: qmc_in
         type(qmc_state_t), intent(inout) :: qs
@@ -475,6 +493,9 @@ contains
         type(logging_t), intent(in) :: logging_info
         type(bloom_stats_t), intent(inout) :: bloom_stats
         type(semi_stoch_t) :: determ
+
+        type(cc_hmat_t), intent(inout) :: cc_hmat
+
 
         allocate(cdet%f(sys%basis%tensor_label_len))
         allocate(cdet%data(1))
@@ -511,7 +532,7 @@ contains
                 call do_fciqmc_spawning_attempt(rng, spawn_to_send, bloom_stats, sys, qs, nattempts_current_det, &
                                             cdet, determ, .false., int_pop(ispace), &
                                             sys%read_in%comp .and. modulo(ispace,2) == 0, &
-                                            ispace, logging_info)
+                                            ispace, logging_info, cc_hmat)
 
                 ! Clone or die.
                 ! list_pop is meaningless as particle_t%nparticles is updated upon annihilation.
@@ -530,7 +551,7 @@ contains
 
     subroutine do_fciqmc_spawning_attempt(rng, spawn, bloom_stats, sys, qs, nattempts_current_det, &
                                           cdet, determ, determ_parent, pop, imag_parent, ispace, &
-                                          logging_info)
+                                          logging_info, cc_hmat)
 
         ! Perform spawning from a given determinant in a given space.
 
@@ -560,13 +581,18 @@ contains
         use system, only: sys_t
         use qmc_data, only: qmc_state_t
         use logging, only: logging_t
-        use determinants, only: det_info_t
+        use determinants, only: det_info_t, alloc_det_info_t, dealloc_det_info_t
         use bloom_handler, only: bloom_stats_t, accumulate_bloom_stats
         use semi_stoch, only: semi_stoch_t, check_if_determ
 
-        use excitations, only: excit_t, create_excited_det
+        use excitations, only: excit_t, create_excited_det, get_excitation, get_excitation_level
         use death, only: stochastic_death
         use spawn_data, only: spawn_t
+
+        use reference_determinant, only: reference_t, reference_t_json
+        use spawning, only: spawn_cc_stoch
+
+        use cc_msu, only: cc_hmat_t, store_hmat
 
         type(sys_t), intent(in) :: sys
         type(qmc_state_t), intent(in) :: qs
@@ -588,6 +614,13 @@ contains
         logical :: determ_child
         integer(int_p) :: scratch
 
+        type(det_info_t) :: cdet_out
+        type(hmatel_t) :: hmatel
+        !type(excit_t) :: excitation1, excitation2
+        integer :: excitation1, excitation2
+
+        type(cc_hmat_t), intent(inout) :: cc_hmat
+
         ! First, determine the particle types possibly created by spawning.
         ! If we have a more sophisticated approach to multiple spaces this will
         ! need to be changed.
@@ -606,9 +639,12 @@ contains
         do iparticle = 1, nattempts_current_det
 
             ! Attempt to spawn.
-            call spawner_ptr(rng, sys, qs, qs%spawn_store%spawn%cutoff, qs%psip_list%pop_real_factor, &
+            !call spawner_ptr(rng, sys, qs, qs%spawn_store%spawn%cutoff, qs%psip_list%pop_real_factor, &
+            !                cdet, pop, gen_excit_ptr, qs%trial%wfn_dat, &
+            !                logging_info, nspawned, nspawned_im, connection)
+            call spawn_cc_stoch(rng, sys, qs, qs%spawn_store%spawn%cutoff, qs%psip_list%pop_real_factor, &
                             cdet, pop, gen_excit_ptr, qs%trial%wfn_dat, &
-                            logging_info, nspawned, nspawned_im, connection)
+                            logging_info, nspawned, nspawned_im, connection, hmatel)
             if (imag_parent) then
                 ! If imaginary parent have to factor into resulting signs/reality.
                 scratch = nspawned_im
@@ -618,8 +654,26 @@ contains
 
             ! Spawn if attempt was successful.
             if (nspawned /= 0_int_p) then
+                    call create_excited_det(sys%basis, cdet%f, connection, f_child)
+
+                    excitation1 = get_excitation_level(qs%ref%f0, cdet%f)
+                    excitation2 = get_excitation_level(qs%ref%f0, f_child)
+
+                    if (excitation1 == 3 .and. excitation2 == 3) then
+                        call store_hmat(sys, cc_hmat, hmatel%r, cdet%f, f_child)
+                        !call alloc_det_info_t(sys, cdet_out, .false.)
+                    !   ! !cdet_out%f => f_cdet_out
+                        !call decoder_ptr(sys, f_child, cdet_out)
+                        !open(unit=898,file='test',status='unknown',access='append')
+                        !write(898, '(14i3)', advance='no') cdet%occ_list
+                        !write(898, '(14i3)', advance='no') cdet_out%occ_list
+                        !write(898, *) hmatel%r
+                        !close(898)
+                        !call dealloc_det_info_t(cdet_out, .false.)
+                    endif
                 if (determ_parent) then
                     call create_excited_det(sys%basis, cdet%f, connection, f_child)
+
                     determ_child = check_if_determ(determ%hash_table, determ%dets, f_child)
                     ! If the spawning is both from and to the deterministic space, cancel it.
                     if (.not. determ_child) then

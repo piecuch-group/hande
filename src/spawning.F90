@@ -31,6 +31,89 @@ contains
 
 !--- Spawning wrappers ---
 
+    subroutine spawn_cc_stoch(rng, sys, qmc_state, spawn_cutoff, real_factor, cdet, parent_sign, &
+                              gen_excit_ptr, weights, logging_info, nspawn, nspawn_im, connection, hmatel)
+
+        ! Attempt to spawn a new particle on a connected determinant.
+        ! Only for use with non-complex systems.
+
+        ! This is just a thin wrapper around a system-specific excitation
+        ! generator and a utility function.
+
+        ! In/Out:
+        !    rng: random number generator.
+        ! In:
+        !    sys: system being studied.
+        !    qmc_state: input options relating to QMC methods.
+        !    spawn_cutoff: The size of the minimum spawning event allowed, in
+        !        the encoded representation. Events smaller than this will be
+        !        stochastically rounded up to this value or down to zero.
+        !    real_factor: The factor by which populations are multiplied to
+        !        enable non-integer populations.
+        !    cdet: info on the current determinant (cdet) that we will spawn
+        !        from.
+        !    parent_sign: sign of the population on the parent determinant (i.e.
+        !        either a positive or negative integer).
+        !    gen_excit_ptr: procedure pointer to excitation generators.
+        !        gen_excit_ptr%full *must* be set to a procedure which generates
+        !        a complete excitation.
+        !    weights: importance sampling weights.
+        ! Out:
+        !    nspawn: number of particles spawned, in the encoded representation.
+        !        0 indicates the spawning attempt was unsuccessful.
+        !    nspawn_im: unused argument for compatability with spawner_ptr
+        !        interface for both real and complex systems. Should be set to 0
+        !        if not used.
+        !    connection: excitation connection between the current determinant
+        !        and the child determinant, on which progeny are spawned.
+
+        use determinants, only: det_info_t, alloc_det_info_t, dealloc_det_info_t
+        use excitations, only: excit_t, create_excited_det
+        use qmc_data, only: qmc_state_t
+        use system, only: sys_t
+        use proc_pointers, only: gen_excit_ptr_t, decoder_ptr
+        use dSFMT_interface, only: dSFMT_t
+        use hamiltonian_data
+        use logging, only: write_logging_spawn, logging_t
+
+        type(dSFMT_t), intent(inout) :: rng
+        type(sys_t), intent(in) :: sys
+        type(qmc_state_t), intent(in) :: qmc_state
+        integer(int_p), intent(in) :: spawn_cutoff
+        integer(int_p), intent(in) :: real_factor
+        type(det_info_t), intent(in) :: cdet
+        integer(int_p), intent(in) :: parent_sign
+        type(gen_excit_ptr_t), intent(in) :: gen_excit_ptr
+        real(p), allocatable, intent(in) :: weights(:)
+        type(logging_t), intent(in) :: logging_info
+        integer(int_p), intent(out) :: nspawn, nspawn_im
+        type(excit_t), intent(out) :: connection
+
+        integer(i0) :: f_cdet_out(sys%basis%tot_string_len)
+        type(det_info_t) :: cdet_out
+        real(p) :: pgen, qn_weight
+        type(hmatel_t), intent(inout) :: hmatel
+        logical :: allowed
+
+        nspawn_im = 0_int_p
+
+        ! 1. Generate random excitation.
+        call gen_excit_ptr%full(rng, sys, qmc_state%excit_gen_data, cdet, pgen, connection, hmatel, allowed)
+
+        if (allowed) then
+            qn_weight = calc_qn_spawned_weighting(sys, qmc_state%propagator, cdet%fock_sum, connection)
+        else
+            qn_weight = 1.0_p
+        end if
+        ! 2. Attempt spawning.
+        nspawn = attempt_to_spawn(rng, qmc_state%tau, spawn_cutoff, real_factor, hmatel%r * qn_weight, pgen, &
+                                parent_sign)
+
+
+        if (debug) call write_logging_spawn(logging_info, hmatel, pgen, qn_weight, [nspawn], real(parent_sign, p), .false.)
+
+    end subroutine spawn_cc_stoch
+
     subroutine spawn_standard(rng, sys, qmc_state, spawn_cutoff, real_factor, cdet, parent_sign, &
                               gen_excit_ptr, weights, logging_info, nspawn, nspawn_im, connection)
 
@@ -67,11 +150,11 @@ contains
         !    connection: excitation connection between the current determinant
         !        and the child determinant, on which progeny are spawned.
 
-        use determinants, only: det_info_t
-        use excitations, only: excit_t
+        use determinants, only: det_info_t, alloc_det_info_t, dealloc_det_info_t
+        use excitations, only: excit_t, create_excited_det
         use qmc_data, only: qmc_state_t
         use system, only: sys_t
-        use proc_pointers, only: gen_excit_ptr_t
+        use proc_pointers, only: gen_excit_ptr_t, decoder_ptr
         use dSFMT_interface, only: dSFMT_t
         use hamiltonian_data
         use logging, only: write_logging_spawn, logging_t
@@ -89,6 +172,8 @@ contains
         integer(int_p), intent(out) :: nspawn, nspawn_im
         type(excit_t), intent(out) :: connection
 
+        integer(i0) :: f_cdet_out(sys%basis%tot_string_len)
+        type(det_info_t) :: cdet_out
         real(p) :: pgen, qn_weight
         type(hmatel_t) :: hmatel
         logical :: allowed
@@ -106,6 +191,19 @@ contains
         ! 2. Attempt spawning.
         nspawn = attempt_to_spawn(rng, qmc_state%tau, spawn_cutoff, real_factor, hmatel%r * qn_weight, pgen, &
                                 parent_sign)
+
+        if (nspawn /= 0_int_p) then
+            call alloc_det_info_t(sys, cdet_out, .false.)
+            call create_excited_det(sys%basis, cdet%f, connection, f_cdet_out)
+            !cdet_out%f => f_cdet_out
+            call decoder_ptr(sys, f_cdet_out, cdet_out)
+            open(unit=898,file='test',status='unknown',access='append')
+            write(898, '(14i3)', advance='no') cdet%occ_list
+            write(898, '(14i3)', advance='no') cdet_out%occ_list
+            write(898, *) hmatel%r
+            close(898)
+            call dealloc_det_info_t(cdet_out, .false.)
+        endif
 
         if (debug) call write_logging_spawn(logging_info, hmatel, pgen, qn_weight, [nspawn], real(parent_sign, p), .false.)
 
