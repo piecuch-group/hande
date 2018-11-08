@@ -1,4 +1,5 @@
 module cc_msu
+
     use const
     use errors, only: stop_all
 
@@ -18,10 +19,6 @@ module cc_msu
         integer(kind=8), allocatable :: c(:,:,:,:,:,:)
         integer(kind=8), allocatable :: d(:,:,:,:,:,:)
     end type p_mask_t
-
-    !type cc_element_t
-    !    real(p) :: hmatel
-    !end type cc_element_t
 
 contains
 
@@ -247,7 +244,7 @@ contains
 
                 select case (spin_case)
                 case (0)
-                    p_space%a(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1)) = 1
+                    call antisymmetrize_p_space(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1), p_space%a)
 
                 case (1)
                     do i_spin=1, 3
@@ -273,7 +270,7 @@ contains
                             endif
                         endif
                     enddo
-                    p_space%a(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1)) = 1
+                    call antisymmetrize_p_space(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1), p_space%a)
 
                 case (2)
                     do i_spin=1, 3
@@ -289,10 +286,10 @@ contains
                             to_orb(i_spin) = tmp_orb
                         endif
                     enddo
-                    p_space%a(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1)) = 1
+                    call antisymmetrize_p_space(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1), p_space%a)
 
                 case (3)
-                    p_space%a(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1)) = 1
+                    call antisymmetrize_p_space(to_orb(3), to_orb(2), to_orb(1), from_orb(3), from_orb(2), from_orb(1), p_space%a)
 
                 end select
 
@@ -320,8 +317,6 @@ contains
         integer, intent(in) :: ireport
         real(kind=8) :: epst,r1
 
-
-
         real(kind=8), allocatable :: z(:,:), f_a(:,:), f_b(:,:)
         real(kind=8), allocatable :: v_aa(:,:,:,:), v_ab(:,:,:,:), v_bb(:,:,:,:)
 
@@ -331,7 +326,8 @@ contains
         type(p_mask_t) :: p_space
         integer :: p_space_size
 
-        integer(kind=8), parameter :: idiis = 8, ifr = 333, inf = 400, io = 401
+        ! [TODO] use HANDE's unit generation system
+        integer(kind=8), parameter :: diis_space = 8, inf = 400, io = 401
 
         integer(kind=8) :: occ_a, occ_b
         integer(kind=8) :: orbs
@@ -343,6 +339,7 @@ contains
 
         ! Testing vars
         integer :: a, b, c
+        logical :: restart = .false.
 
         orbs = ceiling(real(sys%basis%nbasis / 2))
         occ_a = sys%nel / 2 + sys%Ms
@@ -355,13 +352,13 @@ contains
 
         call gen_p_space(sys, ref%f0, hmat, psip_list, p_space, p_space_size)
 
-
         allocate(z(orbs, orbs))
         allocate(v_aa(orbs, orbs, orbs, orbs))
         allocate(v_ab(orbs, orbs, orbs, orbs))
         allocate(v_bb(orbs, orbs, orbs, orbs))
 
         associate(one_e_ints=>sys%read_in%one_e_h_integrals, coulomb_ints=>sys%read_in%coulomb_integrals)
+
             do i=1, orbs
                 do j=1, orbs
                     z(i,j) = get_one_body_int_mol_real(one_e_ints, 2*i, 2*j, sys)
@@ -383,48 +380,7 @@ contains
 
         end associate
 
-        !open(834,file='onebody.inp', status='old')
-        write(cc_log, '(a,i0.6,a)') 'p_space', ireport, '.txt'
-        open(834, file=trim(cc_log), status='unknown')
-
-        do i=1, occ_a
-            do j=1, occ_a
-                do k=1, occ_a
-                    do a=occ_a+1, orbs
-                        do b=occ_a+1, orbs
-                            do c=occ_a+1, orbs
-                                if (p_space%a(c,b,a,k,j,i) == 1) then
-                                    write(834, '(6i3)') c,b,a,k,j,i
-                                endif
-                            enddo
-                        enddo
-                    enddo
-                enddo
-            enddo
-        enddo
-        !do i=1, orbs
-        !    do j=1, i
-        !        read(834,*) x, indx
-        !        z(i,j) = x
-        !        z(j,i) = x
-        !    enddo
-        !enddo
-
-        close(834)
-
-        !open(834,file='twobody.inp', status='old')
-
-        !do
-        !    read(834, *, iostat=ios) i, j, k, l, x
-        !    if (ios /= 0) exit
-
-        !    if (i + j + k + l /= 0) then
-        !        v_ab(i,k,j,l) = x
-        !    endif
-        !enddo
-
-        !close(834)
-
+        call write_p_space_to_file(occ_a, orbs, ireport, p_space%a)
 
         allocate(f_a(orbs, orbs))
         allocate(f_b(orbs, orbs))
@@ -449,18 +405,6 @@ contains
         ! Generate fock operator
         call gen_fock(occ_a, occ_b, orbs, v_ab, f_a, f_b, e_hf)
 
-        !print *, occ_a, occ_b, orbs
-        !print *, sys%read_in%Ecore, sys%read_in%Ecore + e_hf, e_hf, ref%H00
-
-        open(ifr,file='t_vec.moe',form='unformatted')
-        if (iDIIS.gt.0) then
-            allocate(icoe(iDIIS+2))
-            do i=1, iDIIS+2
-                icoe(i)=800+i
-                open(icoe(i),file='t_vec.c'//char(i-1+ichar('0')), form='unformatted')
-            enddo
-        endif
-
         write(cc_log, '(a,i0.6,a)') 'cc_p', ireport, '.out'
         open(io, file=trim(cc_log), status='unknown')
 
@@ -469,27 +413,13 @@ contains
 
         write(io, '(a,i8)') 'P space size ', p_space_size
 
-        !p_space = 1
-
-        call solve_cc(io, occ_a, occ_b, orbs, int(0,kind=8), e_cor, ref%H00, &
-            0.0d0, int(7,kind=8), ifr, &
-            f_a, f_b, v_aa, v_bb, v_ab, .false., icoe, idiis, &
-            p_space%a)
-            !p_space%a, p_space%b, p_space%c, p_space%d)
-            !f_a, f_b, v_aa(3:30,3:30,3:30,3:30), v_bb(3:30,3:30,3:30,3:30), v_ab(3:30,3:30,3:30,3:30), .false., icoe, idiis, &
-
-        if(iDIIS.ne.0)then
-            do i=1,iDIIS+2
-                close(icoe(i),status='delete')
-            enddo
-        endif
-
-        write(io,*)'E(Ref)=',ref%H00
-        write(io,*)'E(Cor)=',e_cor
-        write(io,*)'E(CCSDt1)=',ref%H00+ e_cor
+        call solve_ccpq(io, occ_a, occ_b, orbs, int(0,kind=8), &
+            e_cor, ref%H00, &
+            0.0d0, int(10,kind=8), &
+            f_a, f_b, v_aa, v_bb, v_ab, &
+            diis_space, restart, p_space%a)
 
         close(io)
-        close(ifr)
 
         deallocate(f_a)
         deallocate(f_b)
@@ -504,6 +434,7 @@ contains
     end subroutine cc_p_driver
 
     subroutine gen_fock(occ_a, occ_b, orbs, v_ab, f_a, f_b, e_hf)
+
         integer(kind=8), intent(in) :: occ_a, occ_b, orbs
 
         real(kind=8), intent(inout) :: f_a(orbs, orbs), f_b(orbs, orbs)
@@ -566,5 +497,81 @@ contains
 
     end subroutine gen_fock
 
+    subroutine antisymmetrize_p_space(c, b, a, k, j, i, p_space)
+
+        integer, intent(in) :: a, b, c, i, j, k
+        integer(kind=8), allocatable, intent(inout) :: p_space(:,:,:,:,:,:)
+
+
+        p_space(c,b,a,k,j,i) = 1
+        p_space(c,b,a,k,i,j) = 1
+        p_space(c,b,a,i,j,k) = 1
+        p_space(c,b,a,i,k,j) = 1
+        p_space(c,b,a,j,k,i) = 1
+        p_space(c,b,a,j,i,k) = 1
+        p_space(c,a,b,k,j,i) = 1
+        p_space(c,a,b,k,i,j) = 1
+        p_space(c,a,b,i,j,k) = 1
+        p_space(c,a,b,i,k,j) = 1
+        p_space(c,a,b,j,k,i) = 1
+        p_space(c,a,b,j,i,k) = 1
+        p_space(a,b,c,k,j,i) = 1
+        p_space(a,b,c,k,i,j) = 1
+        p_space(a,b,c,i,j,k) = 1
+        p_space(a,b,c,i,k,j) = 1
+        p_space(a,b,c,j,k,i) = 1
+        p_space(a,b,c,j,i,k) = 1
+        p_space(a,c,b,k,j,i) = 1
+        p_space(a,c,b,k,i,j) = 1
+        p_space(a,c,b,i,j,k) = 1
+        p_space(a,c,b,i,k,j) = 1
+        p_space(a,c,b,j,k,i) = 1
+        p_space(a,c,b,j,i,k) = 1
+        p_space(b,c,a,k,j,i) = 1
+        p_space(b,c,a,k,i,j) = 1
+        p_space(b,c,a,i,j,k) = 1
+        p_space(b,c,a,i,k,j) = 1
+        p_space(b,c,a,j,k,i) = 1
+        p_space(b,c,a,j,i,k) = 1
+        p_space(b,a,c,k,j,i) = 1
+        p_space(b,a,c,k,i,j) = 1
+        p_space(b,a,c,i,j,k) = 1
+        p_space(b,a,c,i,k,j) = 1
+        p_space(b,a,c,j,k,i) = 1
+        p_space(b,a,c,j,i,k) = 1
+
+    end subroutine antisymmetrize_p_space
+
+    subroutine write_p_space_to_file(occ_a, orbs, ireport, p_space)
+
+        integer(kind=8), intent(in) :: occ_a, orbs
+        integer, intent(in) :: ireport
+        integer(kind=8), allocatable, intent(in) :: p_space(:,:,:,:,:,:)
+        character(len=100) :: cc_log
+
+        integer :: i, j, k, a, b, c
+
+        write(cc_log, '(a,i0.6,a)') 'p_space', ireport, '.txt'
+        open(834, file=trim(cc_log), status='unknown')
+
+        do i=1, occ_a
+            do j=1, occ_a
+                do k=1, occ_a
+                    do a=occ_a+1, orbs
+                        do b=occ_a+1, orbs
+                            do c=occ_a+1, orbs
+                                if (p_space(c,b,a,k,j,i) == 1) then
+                                    write(834, '(6i3)') c,b,a,k,j,i
+                                endif
+                            enddo
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+
+        close(834)
+
+    end subroutine write_p_space_to_file
 
 end module cc_msu

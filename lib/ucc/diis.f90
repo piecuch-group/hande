@@ -1,118 +1,169 @@
-subroutine DIIS(io,iDIIS,icoe,KKK0,t0,ncoe)
+module diis
     implicit none
-    integer, intent(in)         :: icoe(iDIIS+2)
-    integer, intent(in)         :: io
-    integer(kind=8), intent(in) :: KKK0, iDIIS, ncoe
-    real(kind=8), intent(inout) :: t0(KKK0)
-    ! Local variables
-    real(kind=8), allocatable   :: t(:), t1(:), t2(:), B(:,:), L(:)
-    real(kind=8), allocatable   :: pivot(:)
-    real(kind=8)                :: dotproduct, ddot
-    real(kind=8)                :: Tim0,CPUTim
-    integer(kind=4)             :: Wall0, TIME, info
-    integer                     :: i, ii, i0, ic, istep, j, j0, k
-    integer                     :: KKK
 
-    Tim0=CPUTim(0)
-    Wall0=TIME()
-    ! I think this is trying to deal with the poorly designed system of files for t
-    do i=1,iDIIS
-        i0=i
-        if (i.gt.iDIIS / 2) then
-            i0 = i + 1
-        endif
-        ic = icoe(i0)
-        rewind(ic)
-        ic = icoe(i0 + 1)
-        rewind(ic)
-    enddo
-    ! Allocate overlap matrix
-    allocate(B(iDIIS + 1,iDIIS + 1))
-    B=0.0d0
-    do istep=1,ncoe
-        do i=1,iDIIS
-            i0=i
-            if (i.gt.iDIIS/2) then
-                i0=i+1
-            endif
-            ic=icoe(i0)
-            read(ic)KKK
-            if (i.eq.1) then
-                allocate(t(KKK),t1(KKK),t2(KKK))
-            endif
-            read(ic) t1
-            backspace(ic)
-            backspace(ic)
-            ic=icoe(i0+1)
-            read(ic)KKK
-            read(ic)t2
-            backspace(ic)
-            backspace(ic)
-            t=t2-t1 ! Set residuum vector
-            do j=1,iDIIS
-                j0=j
-                if (j0.gt.iDIIS/2) then
-                    j0=j0+1
-                endif
-                ic=icoe(j0)
-                read(ic)KKK
-                read(ic)t1
-                if(i.ne.iDIIS)then
-                    backspace(ic)
-                    backspace(ic)
-                endif
-                ic=icoe(j0+1)
-                read(ic)KKK
-                read(ic)t2
-                if (i.ne.iDIIS.or.(j.ne.iDIIS.and.j.ne.iDIIS/2)) then
-                    backspace(ic)
-                    backspace(ic)
-                endif
-                ! Calculate overlap matrix B
-                t1=t2-t1 ! Set residuum vector
-                dotproduct = ddot(KKK, t, 1, t1, 1)
-                B(i,j) = B(i,j) + dotproduct
-            enddo
-        enddo
-        deallocate(t,t1,t2)
-    enddo
+    integer :: chunks = 0
+    integer :: chunk_size = 0
+    integer, parameter :: max_len = (2**30/8)
 
-    do i=1,iDIIS+1
-        B(i,iDIIS+1) = -1.0d0
-        B(iDIIS+1,i) = -1.0d0
-    enddo
+    contains
 
-    B(iDIIS + 1, iDIIS + 1) = 0.0d0
+        subroutine calc_diis(t_vecs_unit, diis_space, t_size, t)
 
-    allocate(L(iDIIS + 1)) ! Allocate lambda and c
-    L=0.0d0
-    L(iDIIS+1) = -1.0d0
-    info = 0
-    allocate(pivot(iDIIS + 1))
-    call dgesv(iDIIS + 1, 1, B, iDIIS + 1, pivot, L, iDIIS + 1, info)
-    ! Changed if(ifs) to if(.not. ifs) might not work!
-    if(info == 0) then
-        t0=0.0d0
-        do i=1,iDIIS
-            i0=i
-            if(i0.gt.iDIIS/2)i0=i0+1
-            ic=icoe(i0)
-            rewind(ic)
-            ii=0
-            do j=1,ncoe
-                read(ic)KKK
-                allocate(t(KKK))
-                read(ic)t
-                do k=1,KKK
-                    t0(ii+k)=t0(ii+k)+L(i)*t(k)
+            ! Input vars
+            integer, intent(in) :: t_vecs_unit
+            integer, intent(in) :: diis_space
+            integer, intent(in) :: t_size
+
+            real(kind=8), allocatable, intent(inout) :: t(:)
+
+            ! Local vars
+            integer, allocatable :: ipiv(:)
+            integer :: info
+            integer :: indx, indy
+
+            real(kind=8), allocatable :: t_aux_1(:), t_aux_2(:), t_aux_3(:)
+            real(kind=8), allocatable :: B(:,:), C(:)
+
+            real(kind=8) :: accum
+            real(kind=8) ddot, axpy
+
+            ! Allocate
+            allocate(B(diis_space+1,diis_space+1))
+            B=0.0d0
+            allocate(t_aux_1(t_size))
+            allocate(t_aux_2(t_size))
+            allocate(t_aux_3(t_size))
+
+            do indx = 1, diis_space
+
+                ! Generate difference vector
+                !read(t_vecs_unit, rec=indx) t_aux_1
+                !read(t_vecs_unit, rec=indx+1) t_aux_2
+                call read_t_vecs(t_vecs_unit, indx,  t_aux_1)
+                call read_t_vecs(t_vecs_unit, indx+1,  t_aux_2)
+
+                t_aux_3 = t_aux_2 - t_aux_1
+
+                do indy = 1, diis_space
+
+                    ! Generate difference vector
+                    !read(t_vecs_unit, rec=indy) t_aux_1
+                    !read(t_vecs_unit, rec=indy+1) t_aux_2
+                    call read_t_vecs(t_vecs_unit, indy,  t_aux_1)
+                    call read_t_vecs(t_vecs_unit, indy+1,  t_aux_2)
+
+                    t_aux_2 = t_aux_2 - t_aux_1
+
+                    accum = 0.0d0
+                    accum = ddot(t_size, t_aux_3, 1, t_aux_2, 1)
+
+                    B(indx,indy) = B(indx,indy) + accum
                 enddo
-                deallocate(t)
-                ii=ii+KKK
             enddo
-        enddo
-    else
-        write(io,'(a)') 'Error during DGESV excecution.'
-    endif
-    call NJ_cputim(io,Tim0)
-    call NJ_walltim(io,Wall0)
-end subroutine DIIS
+
+            deallocate(t_aux_2, t_aux_3)
+
+            ! Set DIIS matrix boundaries
+            b(:,diis_space+1) = -1.0d0
+            b(diis_space+1,:) = -1.0d0
+
+            !allocate(L(iDIIS+1),C(iDIIS+1))
+            allocate(ipiv(diis_space+1))
+            allocate(c(diis_space+1))
+
+            c=0.0d0
+            c(diis_space+1) = -1.0d0
+
+            ! Solve system of equations
+            call dgesv(diis_space+1, 1, B, diis_space+1, ipiv, c, diis_space+1, info)
+
+            if (info /= 0) call abort_cc('DIIS error.')
+
+            t = 0.0d0
+            do indx = 1, diis_space
+                !read(t_vecs_unit, rec=indx) t_aux_1
+                call read_t_vecs(t_vecs_unit, indx, t_aux_1)
+
+                call daxpy(t_size, C(indx), t_aux_1, 1, t, 1)
+
+            enddo
+
+            deallocate(t_aux_1)
+            deallocate(ipiv, c, b)
+
+        end subroutine calc_diis
+
+        subroutine write_t_vecs(t_vecs_unit, iter, diis_space, t)
+
+            integer, intent(in) :: t_vecs_unit
+            integer, intent(in) :: iter
+            integer, intent(in) :: diis_space
+
+            real(kind=8), allocatable, intent(in) :: t(:)
+
+            integer :: indx_rec, i_chunk, i
+
+            indx_rec = mod(iter, diis_space + 1)
+            if (indx_rec == 0) indx_rec = diis_space + 1
+
+            if (chunks == 0) then
+                write(t_vecs_unit, rec=indx_rec) t
+            else
+                do i_chunk=0, chunks
+                    if (i_chunk < chunks) then
+                        write(t_vecs_unit, rec=((indx_rec - 1) * chunks) + i_chunk + 1) &
+                            t(i_chunk*max_len+1:(i_chunk+1)*max_len)
+                    else
+                        write(t_vecs_unit, rec=((indx_rec - 1) * chunks) + i_chunk + 1) &
+                            t(i_chunk*max_len+1:i_chunk*max_len + chunk_size)
+                    endif
+
+                enddo
+            endif
+
+
+        end subroutine write_t_vecs
+
+        subroutine read_t_vecs(t_vecs_unit, indx,  t)
+
+            integer, intent(in) :: t_vecs_unit
+            integer, intent(in) :: indx
+
+            real(kind=8), allocatable, intent(inout) :: t(:)
+
+            integer :: i_chunk
+
+
+            if (chunks == 0) then
+                read(t_vecs_unit, rec=indx) t
+            else
+                do i_chunk=0, chunks
+                    if (i_chunk < chunks) then
+                        read(t_vecs_unit, rec=((indx - 1) * chunks) + i_chunk + 1) &
+                            t(i_chunk*max_len+1:(i_chunk+1)*max_len)
+                    else
+                        read(t_vecs_unit, rec=((indx - 1) * chunks) + i_chunk + 1) &
+                            t(i_chunk*max_len+1:i_chunk*max_len + chunk_size)
+                    endif
+                enddo
+            endif
+
+        end subroutine read_t_vecs
+
+        subroutine init_t_vecs(t_vecs_unit, t_size)
+            integer, intent(in) :: t_vecs_unit, t_size
+
+            chunks = int(t_size / max_len)
+            chunk_size = t_size - max_len * chunks
+
+            if (chunks == 0) then
+                open(t_vecs_unit, file='t_vecs.bin', form='unformatted', recl=t_size*8, access='direct')
+            else
+                open(t_vecs_unit, file='t_vecs.bin', form='unformatted', recl=max_len*8, access='direct')
+            endif
+
+
+        end subroutine init_t_vecs
+
+
+    end module diis

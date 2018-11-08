@@ -1,4 +1,4 @@
-       subroutine Cal_E(N1,N2,N3,N0,
+       subroutine calculate_energy(N1,N2,N3,N0,
      & FockR,FockB,IntR,IntB,IntM,t1A,t1B,t2A,t2B,t2C,
      & E1A,E1B,E2A,E2B,E2C,E1A1A,E1A1B,E1B1B)
 C

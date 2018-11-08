@@ -3,29 +3,42 @@ FC := gfortran
 FCFLAGS := -O0 -fcheck=all -fdefault-integer-8 -m64 -I${MKLROOT}/include -fbacktrace -g -mtune=native
 LDFLAGS := -Wl,--start-group ${MKLROOT}/lib/intel64/libmkl_gf_ilp64.a ${MKLROOT}/lib/intel64/libmkl_gnu_thread.a ${MKLROOT}/lib/intel64/libmkl_core.a -Wl,--end-group -lgomp -lpthread -lm -ldl -luuid
 
-diis_SRCS := $(wildcard libs/DIIS/*.f)
-sub_sj_SRCS := $(wildcard libs/sub_sj/*.f)
-sub_lw_SRCS := $(wildcard libs/sub_lw/*.f)
-cc_SRCS := $(wildcard *.f *.f90)
+cc_SRCS := $(wildcard cc/*.f)
+hbar_SRCS := $(wildcard hbar/*.f)
+lcc_SRCS := $(wildcard lcc/*.f)
+corr_SRCS := $(wildcard corr/*.f)
+main_SRCS := $(wildcard *.f *.f90 *.F90)
 
-diis_OBJS := $(diis_SRCS:.f=.o)
-sub_sj_OBJS := $(sub_sj_SRCS:.f=.o)
-sub_lw_OBJS := $(sub_lw_SRCS:.f=.o)
 cc_OBJS := $(cc_SRCS:.f=.o)
-cc_OBJS := $(cc_OBJS:.f90=.o)
+hbar_OBJS := $(hbar_SRCS:.f=.o)
+lcc_OBJS := $(lcc_SRCS:.f=.o)
+corr_OBJS := $(corr_SRCS:.f=.o)
+main_OBJS := $(main_SRCS:.f=.o)
+main_OBJS := $(main_OBJS:.f90=.o)
+main_OBJS := $(main_OBJS:.F90=.o)
 
-LIBS = diis.a sub_sj.a sub_lw.a
 LIB := cc_p.a
 
 .PHONY: all clean
 
 all: $(LIB)
 
-test: main/main.f $(diis_OBJS) $(sub_sj_OBJS) $(sub_lw_OBJS) $(cc_OBJS)
+test: test_dir/main.f test_dir/NJ_outfile.f $(cc_OBJS) $(hbar_OBJS) $(lcc_OBJS) $(corr_OBJS) $(main_OBJS)
 	$(FC) -o $@ $(FCFLAGS) $^ $(LDFLAGS)
 
-$(LIB): $(diis_OBJS) $(sub_sj_OBJS) $(sub_lw_OBJS) $(cc_OBJS)
+$(LIB): $(cc_OBJS) $(hbar_OBJS) $(lcc_OBJS) $(corr_OBJS) $(main_OBJS)
 	ar -r $@ $^
+
+cc_driver.o: solve_cc.o solve_lcc.o ccp3.o const.o
+
+solve_cc.o: diis.o utils.o
+
+solve_lcc.o: diis.o utils.o const.o
+
+ccp3.o: const.o
+
+printing.o: printing.F90
+	$(FC) -c $(FCFLAGS) -o $@ $<
 
 %.o: %.f90
 	$(FC) -c $(FCFLAGS) -o $@ $<
@@ -33,9 +46,12 @@ $(LIB): $(diis_OBJS) $(sub_sj_OBJS) $(sub_lw_OBJS) $(cc_OBJS)
 %.o: %.f
 	$(FC) -c $(FCFLAGS) -o $@ $<
 
+%.mod: ;
+
 clean:
 	@echo Cleaning...
 	rm -f *.a
-	rm -f $(diis_OBJS) $(sub_sj_OBJS) $(sub_lw_OBJS) $(cc_OBJS)
+	rm -f *.mod */*.mod
+	rm -f $(cc_OBJS) $(hbar_OBJS) $(lcc_OBJS) $(main_OBJS)
 	rm -f main/main.o
 	@echo Done.
